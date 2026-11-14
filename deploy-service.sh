@@ -36,6 +36,8 @@ wait_healthy() {
 sudo docker tag "${IMAGE}:latest" "${IMAGE}:previous" 2>/dev/null || true
 
 # 2. 새 이미지 pull 후 해당 서비스만 교체
+# --no-deps 로 교체하므로 의존 서비스(mysql)는 따로 보장한다. 이미 떠 있으면 아무 일도 하지 않는다
+dc up -d --wait mysql
 dc pull "$SERVICE"
 dc up -d --no-deps "$SERVICE"
 
