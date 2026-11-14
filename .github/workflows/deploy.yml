@@ -1,0 +1,46 @@
+name: Deploy Infra Config
+
+# compose / nginx / 스크립트가 바뀔 때 서버에 복사하고 적용한다.
+# 앱 이미지 배포는 각 repo(frontend, backend)의 워크플로가 맡는다.
+on:
+  push:
+    branches: [main]
+    paths:
+      - docker-compose.yml
+      - nginx/**
+      - "*.sh"
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Copy files
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USERNAME }}
+          key: ${{ secrets.SSH_KEY }}
+          source: docker-compose.yml,nginx,fetch-env.sh,deploy-service.sh,init-cert.sh,setup-swap.sh
+          target: ~/allbutyou/deploy
+
+      - name: Apply
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USERNAME }}
+          key: ${{ secrets.SSH_KEY }}
+          script: |
+            set -e
+            exec 9>/tmp/allbutyou-deploy.lock
+            flock -w 540 9
+            cd ~/allbutyou/deploy
+            chmod +x *.sh
+            ./setup-swap.sh
+            ./fetch-env.sh
+            # 앱 이미지가 아직 한 번도 배포되지 않았다면 compose up 이 실패한다 (첫 배포는 README 순서대로)
+            sudo docker compose up -d
+            # 단일 파일 바인드 마운트라 파일이 새로 쓰이면 inode 가 바뀐다. 재생성해야 새 설정을 읽는다
+            sudo docker compose up -d --force-recreate nginx

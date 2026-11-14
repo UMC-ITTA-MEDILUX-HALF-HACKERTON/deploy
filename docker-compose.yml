@@ -1,0 +1,112 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+# .env 는 compose 변수 치환 전용이다. env_file 로 컨테이너에 통째로 넘기지 않는다
+# (GHCR 토큰 등이 앱 컨테이너 환경변수로 새는 걸 막는다). 필요한 값만 environment 에 명시한다.
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: allbutyou-mysql
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      MYSQL_DATABASE: allbutyou
+      MYSQL_USER: app
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      TZ: Asia/Seoul
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      # 2GB 인스턴스에서 Spring/Next 와 같이 돌아야 해서 버퍼를 줄인다
+      - --innodb-buffer-pool-size=256M
+    volumes:
+      - mysqldata:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p$$MYSQL_ROOT_PASSWORD"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    networks:
+      - allbutyou-network
+
+  backend:
+    image: ghcr.io/${GHCR_OWNER}/allbutyou-backend:${BACKEND_IMAGE_TAG:-latest}
+    container_name: allbutyou-backend
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/allbutyou?serverTimezone=Asia/Seoul&characterEncoding=UTF-8
+      SPRING_DATASOURCE_USERNAME: app
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD}
+      SPRING_DATASOURCE_DRIVER_CLASS_NAME: com.mysql.cj.jdbc.Driver
+      # prod 프로필에는 ddl 설정이 없다. 해커톤 기간에는 스키마를 자동 갱신한다
+      SPRING_JPA_HIBERNATE_DDL_AUTO: update
+      SPRING_JPA_SHOW_SQL: "false"
+      JAVA_TOOL_OPTIONS: -Xms128m -Xmx512m -Duser.timezone=Asia/Seoul
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      # actuator 가 없어서 HTTP 경로로 판단할 수 없다. 포트가 열렸는지만 본다
+      test: ["CMD-SHELL", "nc -z localhost 8080 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+    expose:
+      - "8080"
+    networks:
+      - allbutyou-network
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: allbutyou-nginx
+    restart: unless-stopped
+    logging: *default-logging
+    # nginx 는 인증서를 기동 시점에 읽고 들고 있다. certbot 갱신분을 집도록 6시간마다 reload
+    command:
+      - /bin/sh
+      - -c
+      - "while :; do sleep 6h & wait $${!}; nginx -s reload; done & nginx -g 'daemon off;'"
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      # 인증서가 없는 서버는 NGINX_CONF=default.http-only.conf (init-cert.sh 가 설정)
+      - ./nginx/${NGINX_CONF:-default.conf}:/etc/nginx/conf.d/default.conf:ro
+      - certbot-www:/var/www/certbot:ro
+      - certbot-conf:/etc/letsencrypt:ro
+    networks:
+      - allbutyou-network
+
+  certbot:
+    image: certbot/certbot:latest
+    container_name: allbutyou-certbot
+    restart: unless-stopped
+    logging: *default-logging
+    volumes:
+      - certbot-www:/var/www/certbot
+      - certbot-conf:/etc/letsencrypt
+    # 12시간마다 갱신 시도. 만료 30일 이내일 때만 실제로 갱신한다
+    entrypoint: /bin/sh -c "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done"
+    networks:
+      - allbutyou-network
+
+volumes:
+  mysqldata:
+  certbot-www:
+  certbot-conf:
+
+networks:
+  allbutyou-network:
+    driver: bridge
