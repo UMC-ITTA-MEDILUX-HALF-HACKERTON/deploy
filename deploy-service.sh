@@ -15,11 +15,13 @@ esac
 ./fetch-env.sh
 OWNER="$(grep -E '^GHCR_OWNER=' .env | head -1 | cut -d= -f2-)"
 IMAGE="ghcr.io/${OWNER}/allbutyou-${SERVICE}"
-DC="sudo docker compose"
+CUR_TAG="$NEW_TAG"
+# sudo 는 환경변수를 지운다. 태그 변수를 명시적으로 넘겨야 compose 가 그 태그를 쓴다
+dc() { sudo env "$TAG_VAR=$CUR_TAG" docker compose "$@"; }
 
 wait_healthy() {
   local cid status timeout=150
-  cid="$($DC ps -q "$SERVICE")"
+  cid="$(dc ps -q "$SERVICE")"
   while [ $timeout -gt 0 ]; do
     status="$(sudo docker inspect --format='{{.State.Health.Status}}' "$cid" 2>/dev/null || echo starting)"
     echo "health: $status (남은 ${timeout}s)"
@@ -34,18 +36,17 @@ wait_healthy() {
 sudo docker tag "${IMAGE}:latest" "${IMAGE}:previous" 2>/dev/null || true
 
 # 2. 새 이미지 pull 후 해당 서비스만 교체
-export "$TAG_VAR=$NEW_TAG"
-$DC pull "$SERVICE"
-$DC up -d --no-deps "$SERVICE"
+dc pull "$SERVICE"
+dc up -d --no-deps "$SERVICE"
 
 # 3. 헬스체크. 실패하면 롤백
 if ! wait_healthy; then
   echo "헬스체크 실패. 로그:" >&2
-  $DC logs --tail=100 "$SERVICE" >&2 || true
+  dc logs --tail=100 "$SERVICE" >&2 || true
   if sudo docker image inspect "${IMAGE}:previous" >/dev/null 2>&1; then
     echo "previous 로 롤백한다" >&2
-    export "$TAG_VAR=previous"
-    $DC up -d --no-deps --force-recreate "$SERVICE"
+    CUR_TAG=previous
+    dc up -d --no-deps --force-recreate "$SERVICE"
   fi
   exit 1
 fi
